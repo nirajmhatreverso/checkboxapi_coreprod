@@ -1,6 +1,9 @@
 import os
 import django
 
+from netagent.models import PyaTmpMaster
+from netagent.serializers import TemplateWithCommandsSerializer
+
 # Configure Django settings before importing REST framework
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'coreuat.settings')
 django.setup()
@@ -14,7 +17,7 @@ from pathlib import Path
 import logging
 
 from .utils.logging_config import setup_logging
-from .utils.file_utils import create_unique_file, read_file_to_list
+from .utils.file_utils import create_unique_file, read_file_to_list, log_pretty
 from .utils.device_executor import execute_device_commands,split_by_error, safe_to_bytes, execute_device_commands_with_template, _execute_generic_telnet, execute_device_commands_raw_telnet_with_template
 from .utils.db import insert_onu_activity_log,get_command_with_template
 #get_command_with_template,get_command_configuration_by_id,get_template_by_id,upsert_template_mst, upsert_command_configuration
@@ -174,9 +177,31 @@ class ExecuteCommandsWithTemplateAPIView(APIView):
     def post(self, request):
         client_ip = request.META.get('REMOTE_ADDR', 'unknown')
         logger.info(f"POST /ExecuteCommandsWithTemplateAPIView from {client_ip}")
-
+        outputs = []
+        tmp_file = None
+        file_content = []
+        onu_activity_name = "config"
+        onu_command = "omci"
+        user_name = None
+        olt_ip = None
+        onu_serial = None
+        username = None
+        password = None
+        service_name = None
+        stat_ip = None
+        ip_address = None
+        mask_address = None
+        protocol_type = None
+        onu_type = None
+        dns_one = None
+        dns_two = None
+        userid = None
+        request_ = None
+        onu_response = None
         try:
             data = request.data
+            print(type(data))
+            logger.info(f"Request data: {request.data}")
             template_name = data.get("template_name")
             parameters = data.get("parameters", {})
             host_name = parameters["host_ip"]
@@ -184,9 +209,28 @@ class ExecuteCommandsWithTemplateAPIView(APIView):
                 return Response({"error": "Missing template_name"}, status=400)
             if not host_name:
                 return Response({"error": "Missing host_name"}, status=400)
-
+            
+            #Fields for logging
+            onu_activity_name = "config"
+            onu_command = "omci"
+            user_name = parameters.get("user_name")
+            olt_ip = parameters.get("host_ip") or None
+            onu_serial = parameters.get("SERIAL") or None
+            username = parameters.get("ONU_USER_NAME")
+            password = parameters.get("ONU_PASSWORD")
+            service_name = parameters.get("ONU_SERVICE_NAME") or None  
+            stat_ip = parameters.get("TAL_GETWAY") or None
+            ip_address = parameters.get("TAL_IP_ADDRESS") or None
+            mask_address = parameters.get("TAL_SUBNET_MASK") or None
+            protocol_type = parameters.get("connection_type") or None
+            onu_type = parameters.get("ONU_TYPE") or None
+            dns_one = parameters.get("TAL_DNS_ONE") or None
+            dns_two = parameters.get("TAL_DNS_TWO") or None
+            userid = parameters.get("USER_ID") or None
+            request_ = None #CURRENTLY BLANK
             # Prepare file
             tmp_file = create_unique_file(TMP_DIR, prefix="exec_cmd_temp_", extension=".tmp")
+            onu_response = tmp_file
 
             # Call your get_command_with_template function here
             commands = get_command_with_template(template_name)
@@ -214,10 +258,39 @@ class ExecuteCommandsWithTemplateAPIView(APIView):
                     host=host_name,
                     device=device)
                     
-            
+            logger.info(f"reading file : {file_content}")
             file_content = read_file_to_list(tmp_file)
             # it will return success & error statements
             success, failed = split_by_error(file_content, ERROR_CHECK)
+
+            # Logging only when successful execution (no failures)
+            logger.info(f"log insertion to db")
+            if 0 == 0:
+                try:
+                    insert_onu_activity_log(
+                onu_activity_ts=datetime.now(),
+                onu_activity_name=onu_activity_name,
+                onu_command=onu_command,
+                user_name=userid,
+                olt_ip=olt_ip,
+                onu_serial=onu_serial,
+                username=username,
+                password=password,
+                service_name=service_name,
+                stat_ip=stat_ip,
+                ip_address=ip_address,
+                mask_address=mask_address,
+                protocol_type=protocol_type,
+                onu_type=onu_type,
+                dns_one=dns_one,
+                dns_two=dns_two,
+                request=request_,
+                onu_response=onu_response,
+                auto_commit=True)
+                
+                except Exception as log_error:
+                    logger.error(f"Logging failed: {log_error}")
+            logger.info(f"log insertion to db completed")
             
             return Response({
                 "status": "success" if not failed else "Error",
@@ -230,10 +303,40 @@ class ExecuteCommandsWithTemplateAPIView(APIView):
             }, status=200)
 
         except Exception as e:
+            logger.info(f"log insertion to db")
+            if 0 == 0:
+                try:
+                    insert_onu_activity_log(
+                        onu_activity_ts=datetime.now(),
+                        onu_activity_name=onu_activity_name,
+                        onu_command=onu_command,
+                        user_name=userid,
+                        olt_ip=olt_ip,
+                        onu_serial=onu_serial,
+                        username=username,
+                        password=password,
+                        service_name=service_name,
+                        stat_ip=stat_ip,
+                        ip_address=ip_address,
+                        mask_address=mask_address,
+                        protocol_type=protocol_type,
+                        onu_type=onu_type,
+                        dns_one=dns_one,
+                        dns_two=dns_two,
+                        request=request_,
+                        onu_response=onu_response,
+                        auto_commit=True)
+                        
+                except Exception as log_error:
+                    logger.error(f"Logging failed: {log_error}")
+            logger.info(f"log insertion to db completed")
             logger.exception("Critical error in ExecuteCommandsWithTemplateAPIView endpoint")
             return Response({
                 "status": "error",
-                "message": str(e)
+                "message": str(e),
+                "outputs": outputs,
+                "fileName": tmp_file,
+                "file_preview": file_content[:100] 
             }, status=500)  
 
 class DbLogSaveAPIView(APIView):
@@ -563,6 +666,48 @@ def create_device_config_json(result, hostname, session_log):
     return sample_config['device']
 
 
+
+class GetCommandConfigAPIView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        # Implementation for getting command configuration
+        client_ip = request.META.get('REMOTE_ADDR', 'unknown')
+        logger.info(f"POST /execute-generic-telnet from {client_ip}")
+        try:
+            data = request.data
+            template_name = data.get("template_name")
+            if not template_name:
+                return Response(
+                    {'error':'template_id is required'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            templates = PyaTmpMaster.objects.prefetch_related('temp').filter(template_id=template_name).all()
+            if not templates:
+                return Response(
+                    {'error': 'Template not found'},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+        
+            template = templates.first()
+            commands = template.temp.all().order_by('sequence')
+        
+            data = {
+                "commands": commands,
+                "template": template
+            }
+        
+            serializer = TemplateWithCommandsSerializer(data)
+            return Response(serializer.data)
+
+
+        except Exception as e:
+            logger.exception("Critical error in execute-generic-telnet endpoint")
+            return Response({
+                "status": "error",
+                "message": str(e)
+            }, status=500)
+
 class ExecuteGenericTelnetAPIView(APIView):
     permission_classes = [AllowAny]
 
@@ -633,3 +778,5 @@ class ExecuteGenericTelnetAPIView(APIView):
                 "status": "error",
                 "message": str(e)
             }, status=500)
+        
+

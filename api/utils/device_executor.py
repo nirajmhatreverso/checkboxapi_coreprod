@@ -6,7 +6,9 @@ import telnetlib
 from .file_utils import clean_text, replace_new_line, replace_variables,replace_ivariables
 from .db import get_nested_command_configuration_by_id
 logger = logging.getLogger('cmts_api')
-strict_error_chk = False
+strict_error_chk = True
+IP_CHECK = ["125.99.55.205","125.99.55.250"]
+sleep_time = 1
 
 def execute_device_db_commands() -> list:
     logger.info(f"execute device db successfully...")
@@ -89,6 +91,9 @@ def _execute_generic_telnet(
 
             # -- Execute commands ------------------------------------------
             for cmd in commands:
+                if host in IP_CHECK:
+                    time.sleep(sleep_time)
+                    logger.debug(f"Sleep of {sleep_time} seconds executed for IP in IP_CHECK list")
                 logger.info(f"[{host}] Executing: {cmd}")
                 tn.write(cmd.encode() + b"\n")
                 output = read_until_prompt(tn, prompt, timeout=60)
@@ -142,6 +147,9 @@ def execute_device_commands(
                             logger.warning(f"Enable mode failed on {host}: {e}")
 
                 for cmd in commands:
+                    if host in IP_CHECK:
+                        time.sleep(sleep_time)
+                        logger.debug(f"Sleep of {sleep_time} seconds executed for IP in IP_CHECK list")
                     logger.info(f"Executing: {cmd}")
                     output = conn.send_command(
                         cmd,
@@ -253,6 +261,9 @@ def execute_device_commands_with_template(template_name: str,
                             logger.warning(f"Enable mode failed on {host}: {e}")
 
                 for cmd_dict in command_info:
+                    if host in IP_CHECK:
+                        time.sleep(sleep_time)
+                        logger.debug(f"Sleep of {sleep_time} seconds executed for IP in IP_CHECK list")
                     cmd = cmd_dict['commands']
                     cmd = replace_variables(str(cmd), parameters)
                     success_response_pattern = cmd_dict['success_response_pattern']
@@ -434,6 +445,9 @@ def execute_device_commands_raw_telnet_with_template(template_name: str,
             
             # -- Execute commands ------------------------------------------
             for cmd_dict in command_info:
+                if host in IP_CHECK:
+                    time.sleep(sleep_time)
+                    logger.debug(f"Sleep of {sleep_time} seconds executed for IP in IP_CHECK list")
                 #logger.debug(f"[{host}] Executing: {cmd_dict}")
                 error_response_pattern = cmd_dict['error_response_pattern']
                 success_response_pattern = cmd_dict['success_response_pattern']

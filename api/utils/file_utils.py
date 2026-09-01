@@ -3,6 +3,7 @@ from pathlib import Path
 import datetime
 import re
 import logging
+import pprint
 
 logger = logging.getLogger('cmts_api')
 
@@ -19,6 +20,11 @@ def clean_text(s: str) -> str:
     s = s.replace('\x00', '')
     s = re.sub(r'[\x00-\x1F\x7F]', '', s)
     return s.strip()
+
+def log_pretty(obj):
+    # set up pretty printer
+    pp = pprint.PrettyPrinter(indent=2, sort_dicts=False)
+    pretty_out = f"{pp.pformat(obj)}"
 
 
 def replace_new_line(s: str, lineseparator: str) -> str:

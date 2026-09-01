@@ -8,30 +8,16 @@ import logging
 from typing import Optional
 from datetime import datetime
 from zoneinfo import ZoneInfo
-
+import binascii
 
 from .logging_config import setup_logging
 
-#logger = logging.getLogger(__name__)
 logger = setup_logging(debug=False)
 
-#logger = setup_logging(debug=False) 
-# Option A: Use credentials directly (less secure, but simple)
-# CONNECTION_PARAMS = {
-#     "user": "reports",
-#     "password": "2322",
-#     "dsn": "172.20.20.24:1213/misdb"
-# }
-
-# Option B: Better – store in Django settings (recommended)
-# settings.py:
-# ORACLE_DB = {
-#     'USER': 'reports',
-#     'PASSWORD': '2322',
-#     'HOST': '172.20.20.24',
-#     'PORT': 1213,
-#     'SERVICE_NAME': 'misdb'
-# }
+template_master = settings.DATABASES['table']['template_master']
+nested_configuration = settings.DATABASES['table']['nested_configuration']
+command_configuration = settings.DATABASES['table']['command_configuration']
+activity_log = settings.DATABASES['table']['activity_log']
 
 @contextmanager
 def get_oracle_connection():
@@ -78,6 +64,13 @@ def get_oracle_connection_simple():
     )
 
 
+def safe_raw(value):
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return binascii.hexlify(value.encode()).decode()
+    return value
+
 def get_sequence_id(cursor, seq_name: str = "UAT_ONU_ACT_LOG_DETAILS_SEQ") -> int:
     """Standalone way to get next sequence value as int"""
     cursor.execute(f"SELECT {seq_name}.NEXTVAL FROM DUAL")
@@ -99,9 +92,9 @@ def get_template_mst( cursor, template_name ):
             HOST,
             DEVICE_TYPE,
             TEMPLATE_NAME
-        FROM PYA_TMP_MASTER
+        FROM {template_master}
         WHERE TEMPLATE_NAME = :template_name
-    """
+    """.format(template_master=template_master)
     try:
         cursor.execute(config_mst_query, template_name=template_name)
         rows = cursor.fetchall()
@@ -128,7 +121,7 @@ def upsert_nested_command_configurations(
     Returns: the TEMPLATE_ID (existing or newly created)
     """
     merge_sql = """
-    MERGE INTO PYA_NESTEST_CONFIGURATION t
+    MERGE INTO {nested_configuration} t
     USING (SELECT :template_id AS TEMPLATE_ID FROM dual) s
     ON (t.TEMPLATE_ID = s.TEMPLATE_ID)
         
@@ -154,7 +147,7 @@ def upsert_nested_command_configurations(
         :success_pattern,
         :sequence
         )
-    """
+    """.format(nested_configuration=nested_configuration)
         
     with get_oracle_connection() as conn:
         cursor = conn.cursor()
@@ -198,7 +191,7 @@ def upsert_template_mst(
     Returns: the TEMPLATE_ID (existing or newly created)
     """
     merge_sql = """
-    MERGE INTO PYA_TMP_MASTER t
+    MERGE INTO {template_master} t
     USING (SELECT :template_name AS TEMPLATE_NAME FROM dual) s
     ON (t.TEMPLATE_NAME = s.TEMPLATE_NAME)
     
@@ -247,7 +240,7 @@ def upsert_template_mst(
             :device_type,
             :template_name
         )
-    """
+    """.format(template_master=template_master)
     with get_oracle_connection() as conn:
         cursor = conn.cursor()
         try:
@@ -272,7 +265,7 @@ def upsert_template_mst(
             cursor.execute(
                 """
                 SELECT TEMPLATE_ID 
-                FROM PYA_TMP_MASTER 
+                FROM {template_master} 
                 WHERE TEMPLATE_NAME = :tn
                 """,
                 bind_vars1
@@ -291,6 +284,9 @@ def upsert_template_mst(
         
 def get_command_configuration( cursor, command_name ):
     """ select data from pya_config_master """
+
+    command_configuration = settings.DATABASES['table']['command_configuration']
+
     config_mst_query="""
         SELECT 
             CONFIG_ID,
@@ -303,9 +299,9 @@ def get_command_configuration( cursor, command_name ):
             ERROR_RESPONSE_PATTERN,
             SUCCESS_RESPONSE_PATTERN,
             DEVICE_NAME
-        FROM PYA_COMMAND_CONFIGURATION
+        FROM {command_configuration}
         WHERE COMMAND_NAME = :command_name
-    """
+    """.format(command_configuration=command_configuration)
     try:
         cursor.execute(config_mst_query, command_name=command_name)
         rows = cursor.fetchall()
@@ -353,7 +349,7 @@ def upsert_command_configuration(
     Returns: the CONFIG_ID (newly inserted or existing)
     """
     merge_sql = """
-    MERGE INTO PYA_COMMAND_CONFIGURATION t
+    MERGE INTO {command_configuration} t
     USING (SELECT :command_name AS COMMAND_NAME FROM dual) s
     ON (t.COMMAND_NAME = s.COMMAND_NAME)
     
@@ -397,7 +393,7 @@ def upsert_command_configuration(
             :success_resp_pattern,
             :device_name
         )
-    """
+    """.format(command_configuration=command_configuration)
     #logger.info(f"merge_sql : {merge_sql}")
     with get_oracle_connection() as conn:
         cursor = conn.cursor()
@@ -421,9 +417,9 @@ def upsert_command_configuration(
             conn.commit()
             merge_sql1 = """
                 SELECT CONFIG_ID 
-                FROM PYA_COMMAND_CONFIGURATION 
+                FROM {command_configuration} 
                 WHERE COMMAND_NAME = :cmd_name
-                """
+                """.format(command_configuration=command_configuration)
             cursor.execute(merge_sql1,bind_vars1)
             #formatted_sql = _format_query_for_logging(merge_sql1, bind_vars1)
             config_id = cursor.fetchone()[0]
@@ -462,8 +458,10 @@ def insert_onu_activity_log(
     Returns the generated ONU_ACTIVITY_LOG_ID (from sequence)
     """
     
+    activity_log = settings.DATABASES['table']['activity_log']
+    
     sql = """
-    INSERT INTO REPORTS.UAT_ONU_ACTIVITY_LOG_DETAILS (
+    INSERT INTO {activity_log} (
         ONU_ACTIVITY_LOG_ID,
         ONU_ACTIVITY_NAME,
         ONU_COMMAND,
@@ -504,8 +502,28 @@ def insert_onu_activity_log(
         :onu_response,
         CURRENT_TIMESTAMP
     )
-    """
+    """.format(activity_log=activity_log)
 #    
+    logger.info(f"""
+        insert_onu_activity_log params:
+        onu_activity_ts  = {datetime.now()}
+        onu_activity_name= {onu_activity_name}
+        onu_command      = {onu_command}
+        user_name        = {user_name}
+        olt_ip           = {olt_ip}
+        onu_serial       = {onu_serial}
+        username         = {username}
+        password         = {password}
+        service_name     = {service_name}
+        stat_ip          = {stat_ip}
+        ip_address       = {ip_address}
+        mask_address     = {mask_address}
+        protocol_type    = {protocol_type}
+        onu_type         = {onu_type}
+        dns_one          = {dns_one}
+        dns_two          = {dns_two}
+        onu_response     = {onu_response}
+    """)
     logger.info(f"request {str(request)}")
     logger.info(f"onu_response {onu_response}")
     try:
@@ -536,7 +554,7 @@ def insert_onu_activity_log(
                 "dns_one": str(dns_one),
                 "dns_two": str(dns_two),
                 "request": request,                 # bytes or None
-                "onu_response": onu_response     # bytes or None
+                "onu_response": safe_raw(onu_response)     # bytes or None
                 #"onu_activity_ts": onu_activity_ts
             }
             cursor.execute(sql, params)
@@ -590,13 +608,13 @@ def get_command_with_template( command_name: str) -> dict:
                 TP.TEMPLATE_EXPECT_STR,
                 TP.TIMEOUT
             FROM
-                PYA_COMMAND_CONFIGURATION CF
-            INNER JOIN PYA_TMP_MASTER TP ON
+            {command_configuration} CF
+            INNER JOIN {template_master} TP ON
                 TP.TEMPLATE_ID = CF.TEMPLATE_ID
             WHERE
                 CF.COMMAND_NAME =  :command_name
             ORDER BY CF.SEQUENCE
-    """
+    """.format(command_configuration=command_configuration, template_master=template_master)
     logger.info(f"query: {query}")
     try:
         with get_oracle_connection() as conn:
@@ -656,8 +674,8 @@ def get_nested_command_configuration_by_id( template_id: int ) -> dict:
     Returns: dict with nessted command configuration details
     """
     query = """
-       SELECT TEMPLATE_ID,COMMANDS,ERROR_PATTERN,SUCCESS_PATTERN,SEQUENCE FROM PYA_NESTEST_CONFIGURATION WHERE TEMPLATE_ID=:template_id
-    """
+       SELECT TEMPLATE_ID,COMMANDS,ERROR_PATTERN,SUCCESS_PATTERN,SEQUENCE FROM {nested_configuration} WHERE TEMPLATE_ID=:template_id
+    """.format(nested_configuration=nested_configuration)
     logger.debug(f"query: {query}")
     try:
         with get_oracle_connection() as conn:
@@ -696,9 +714,9 @@ def get_command_configuration_by_id( config_id: int ) -> dict:
     SELECT CONFIG_ID, TEMPLATE_ID, COMMANDS, SUCCESS_RESPONSE, ERROR_RESPONSE,
            COMMAND_NAME, COMMAND_PURPOSE, ERROR_RESPONSE_PATTERN, 
            SUCCESS_RESPONSE_PATTERN, DEVICE_NAME
-    FROM PYA_COMMAND_CONFIGURATION
+    FROM {command_configuration}
     WHERE CONFIG_ID = :config_id
-    """
+    """.format(command_configuration=command_configuration)
     
     try:
         with get_oracle_connection() as conn:
@@ -739,9 +757,9 @@ def get_template_by_id( template_id: int) -> dict:
     SELECT TEMPLATE_ID, LOGIN_TYPE, USERNAME, PASSWORD, SECRET, 
            GLOBAL_DELAY_FACTOR, PORT, ENABLE_CUSTOM, LINE_SEPERATOR, 
            HOST, DEVICE_TYPE, TEMPLATE_NAME
-    FROM PYA_TMP_MASTER 
+    FROM {template_master} 
     WHERE TEMPLATE_ID = :template_id
-    """
+    """.format(template_master=template_master)
     
     try:
         with get_oracle_connection() as conn:

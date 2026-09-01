@@ -49,6 +49,7 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    #'netagent.middleware.TokenAuthMiddleware',
 ]
 
 ROOT_URLCONF = 'core.urls'
@@ -87,6 +88,13 @@ DATABASES = {
         'PASSWORD': 'JMNRp578',
         'HOST': '172.20.20.24',
         'PORT': '1213',
+    } ,
+    'table': {
+        'activity_log': 'REPORTS.UAT_ONU_ACTIVITY_LOG_DETAILS',
+        'template_master': 'PYA_TMP_MASTER',
+        'nested_configuration': 'PYA_NESTEST_CONFIGURATION',
+        'command_configuration': 'PYA_COMMAND_CONFIGURATION',
+        'template_configuration': 'REPORTS.UAT_ONU_TEMPLATE_CONFIGURATION',
     }
 }
 
@@ -115,7 +123,8 @@ AUTH_PASSWORD_VALIDATORS = [
 
 LANGUAGE_CODE = 'en-us'
 
-TIME_ZONE = 'UTC'
+TIME_ZONE = 'Asia/Kolkata' 
+USE_TZ = True
 
 USE_I18N = True
 

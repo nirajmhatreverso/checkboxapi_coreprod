@@ -1,5 +1,6 @@
 from django.urls import path
-from .views import InfoAPIView, ExecuteCommandsAPIView, DbLogSaveAPIView, UpsertCommandConfigurationAPIView, UpsertTemplateAPIView, infoAPIDBLogView, GetTemplateByIdAPIView, GetCommandConfigurationAPIView, GetCommandWithTemplateAPIView, ExecuteCommandsWithTemplateAPIView, ExecuteGenericTelnetAPIView
+from .views import GetCommandConfigAPIView, InfoAPIView, ExecuteCommandsAPIView, DbLogSaveAPIView, UpsertCommandConfigurationAPIView, UpsertTemplateAPIView, infoAPIDBLogView, GetTemplateByIdAPIView, GetCommandConfigurationAPIView, GetCommandWithTemplateAPIView, ExecuteCommandsWithTemplateAPIView, ExecuteGenericTelnetAPIView
+from netagent.views import login,signup
 
 urlpatterns = [
     path('info/', InfoAPIView.as_view(), name='api-info'),
@@ -13,4 +14,7 @@ urlpatterns = [
     path('UpsertCmdConf/',UpsertCommandConfigurationAPIView.as_view(), name='upsert-cmd-conf'),
     path('executeWithTemplate/',ExecuteCommandsWithTemplateAPIView.as_view(), name='execute-commands-with-template'),
     path('executeTlt/',ExecuteGenericTelnetAPIView.as_view(), name='execute-generic-telnet'),
+    path('executeTltWithTemp/',GetCommandConfigAPIView.as_view(), name='execute-with-template'),
+    path('register/', signup, name='auth_register'),
+    path('login/', login, name='auth_login'),
 ]
