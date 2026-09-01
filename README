@@ -1,0 +1,1131 @@
+POST
+http://127.0.0.1:8000/api/info/
+
+
+POST
+http://127.0.0.1:8000/api/execute/
+
+
+util/db.python
+
+this is my flask api script please convert this into python django
+networkInterfaceApi.py
+
+Here's your Flask-based network device command execution API converted to Django (using Django REST Framework - DRF):
+Python
+
+# network_interface_api/
+# ├── __init__.py
+# ├── apps.py
+# ├── urls.py
+# ├── views.py
+# ├── utils.py           ← helper functions moved here
+# ├── config.properties  (optional)
+# └── management/
+#     └── commands/
+#         └── runserver_plus.py   (optional)
+
+1. Project Structure Suggestion
+text
+
+network_device_api/
+├── manage.py
+├── network_device_api/
+│   ├── __init__.py
+│   ├── asgi.py
+│   ├── settings.py
+│   ├── urls.py
+│   └── wsgi.py
+└── api/
+    ├── __init__.py
+    ├── apps.py
+    ├── urls.py
+    ├── views.py
+    └── utils/
+        ├── __init__.py
+        ├── device_executor.py
+        ├── file_utils.py
+        └── logging_config.py
+
+2. Main files
+api/utils/logging_config.py
+Python
+
+import logging
+from logging.handlers import RotatingFileHandler
+import os
+
+def setup_logging(debug: bool = False):
+    logger = logging.getLogger('cmts_api')
+    logger.setLevel(logging.DEBUG if debug else logging.INFO)
+
+    # Avoid duplicate handlers
+    if logger.handlers:
+        return logger
+
+    # Console handler
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.DEBUG if debug else logging.INFO)
+    console_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    console_handler.setFormatter(console_formatter)
+
+    # File handler (rotating)
+    log_dir = "logs"
+    os.makedirs(log_dir, exist_ok=True)
+    file_handler = RotatingFileHandler(
+        os.path.join(log_dir, 'cmts_api.log'),
+        maxBytes=5*1024*1024,
+        backupCount=5
+    )
+    file_handler.setLevel(logging.DEBUG)
+    file_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s')
+    file_handler.setFormatter(file_formatter)
+
+    logger.addHandler(console_handler)
+    logger.addHandler(file_handler)
+
+    logger.info("CMTS/Django API logger initialized")
+    return logger
+
+api/utils/file_utils.py
+Python
+
+import os
+from pathlib import Path
+import datetime
+import re
+
+def create_unique_file(base_path: str, prefix: str = "data_", extension: str = ".tmp") -> str:
+    os.makedirs(base_path, exist_ok=True)
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    filename = f"{prefix}{timestamp}{extension}"
+    full_path = os.path.join(base_path, filename)
+    Path(full_path).touch()
+    return os.path.abspath(full_path)
+
+
+def clean_text(s: str) -> str:
+    s = s.replace('\x00', '')
+    s = re.sub(r'[\x00-\x1F\x7F]', '', s)
+    return s.strip()
+
+
+def replace_new_line(s: str, lineseparator: str) -> str:
+    return s.replace('\n', lineseparator)
+
+
+def read_file_to_list(filename: str, strip_newlines: bool = True, encoding: str = 'utf-8') -> list:
+    try:
+        with open(filename, 'r', encoding=encoding) as f:
+            if strip_newlines:
+                return [line.strip() for line in f]
+            return f.readlines()
+    except Exception as e:
+        print(f"Error reading file {filename}: {e}")
+        return []
+
+api/utils/device_executor.py
+Python
+
+from netmiko import ConnectHandler, NetmikoTimeoutException, NetmikoAuthenticationException
+import logging
+
+from .file_utils import clean_text, replace_new_line
+
+logger = logging.getLogger('cmts_api')
+
+
+def execute_device_commands(
+    device: dict,
+    commands: list,
+    filename: str,
+    prompt_pattern: str,
+    line_separator: str,
+    enable_cmd: str = "enable",
+    is_olt: bool = False,
+    use_telnet: bool = False
+) -> list:
+    """
+    Generic command execution function for both CMTS and OLT (SSH/Telnet)
+    """
+    outputs = []
+    host = device.get('host', 'unknown')
+
+    with open(filename, 'w', encoding='utf-8') as f:
+        try:
+            with ConnectHandler(**device) as conn:
+                logger.info(f"Connected to {host} ({'Telnet' if use_telnet else 'SSH'})")
+
+                # Try to enter enable mode (not all devices/OLTs need or support it)
+                try:
+                    conn.enable(cmd=enable_cmd)
+                    logger.info(f"Entered enable mode on {host}")
+                except Exception as e:
+                    if not is_olt:  # OLTs often don't need/want enable
+                        logger.warning(f"Enable mode failed on {host}: {e}")
+
+                for cmd in commands:
+                    logger.info(f"Executing: {cmd}")
+                    output = conn.send_command(
+                        cmd,
+                        expect_string=prompt_pattern,
+                        read_timeout=60,
+                        delay_factor=3,
+                        strip_prompt=False,
+                        strip_command=False
+                    )
+
+                    cleaned = clean_text(replace_new_line(output, line_separator))
+                    outputs.append(cleaned)
+
+                    f.write(cleaned)
+                    f.write("\n############################\n")
+
+            logger.info(f"Commands executed successfully on {host}")
+
+        except (NetmikoTimeoutException, NetmikoAuthenticationException) as e:
+            error_type = type(e).__name__
+            msg = f"{error_type}: Connection failed - {str(e)}"
+            logger.error(msg)
+            outputs = [{"error": "Connection failed", "details": str(e)}]
+            f.write(str(outputs) + "\n#######ERROR#######\n")
+            raise
+
+        except Exception as e:
+            msg = f"Unexpected error on {host}: {str(e)}"
+            logger.exception(msg)
+            outputs = [{"error": "Execution failed", "details": str(e)}]
+            f.write(str(outputs) + "\n#######ERROR#######\n")
+            raise
+
+    return outputs
+
+api/views.py
+Python
+
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework import status
+from rest_framework.permissions import AllowAny
+
+from pathlib import Path
+import logging
+
+from .utils.logging_config import setup_logging
+from .utils.file_utils import create_unique_file, read_file_to_list
+from .utils.device_executor import execute_device_commands
+
+logger = setup_logging(debug=False)  # change to True in development
+
+ALLOWED_LOGIN_TYPES = {"ssh", "telnet", "olt_ssh", "olt_telnet"}
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+TMP_DIR = BASE_DIR / "tmp"
+
+
+class InfoAPIView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        logger.info("GET /info hit")
+        return Response({
+            "cmts_device": {
+                "host": "IP address",
+                "device_type": "cisco_ios_telnet | cisco_xe | linux | huawei | ...",
+                "username": "username",
+                "password": "password",
+                "secret": "enable password (if required)",
+                "global_delay_factor": 2,
+                "session_log": "optional session log path",
+                "port": 23  # for telnet, 22 for ssh
+            },
+            "commands": [
+                "show version",
+                "show running-config"
+            ],
+            "enable_custom": "enable",
+            "login_type": "ssh | telnet | olt_ssh | olt_telnet",
+            "regexPattern": r"[>#]",
+            "lineSeperator": "@@@@@"
+        }, status=status.HTTP_200_OK)
+
+
+class ExecuteCommandsAPIView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        client_ip = request.META.get('REMOTE_ADDR', 'unknown')
+        logger.info(f"POST /execute from {client_ip}")
+
+        try:
+            data = request.data
+
+            cmts_device = data.get("cmts_device")
+            commands = data.get("commands")
+            enable_custom = data.get("enable_custom", "enable")
+            login_type = data.get("login_type", "ssh").lower()
+            regex_pattern = data.get("regexPattern", r"[>#]")
+            line_separator = data.get("lineSeperator", "@@@@@")
+
+            if not cmts_device or not commands:
+                return Response({"error": "Missing cmts_device or commands"}, status=400)
+
+            if not isinstance(commands, list) or not all(isinstance(c, str) for c in commands):
+                return Response({"error": "commands must be list of strings"}, status=400)
+
+            if login_type not in ALLOWED_LOGIN_TYPES:
+                return Response({
+                    "error": f"Invalid login_type. Allowed: {', '.join(ALLOWED_LOGIN_TYPES)}"
+                }, status=400)
+
+            # Prepare file
+            tmp_file = create_unique_file(TMP_DIR, prefix="exec_", extension=".tmp")
+
+            # Choose execution strategy
+            is_olt = "olt" in login_type
+            use_telnet = "telnet" in login_type
+
+            outputs = execute_device_commands(
+                device=cmts_device,
+                commands=commands,
+                filename=tmp_file,
+                prompt_pattern=regex_pattern,
+                line_separator=line_separator,
+                enable_cmd=enable_custom,
+                is_olt=is_olt,
+                use_telnet=use_telnet
+            )
+
+            file_content = read_file_to_list(tmp_file)
+
+            return Response({
+                "status": "success",
+                "host": cmts_device.get("host", "unknown"),
+                "login_type": login_type,
+                "command_count": len(commands),
+                "outputs": outputs,
+                "fileName": tmp_file,
+                "file_preview": file_content[:30]  # first 30 lines for debug/info
+            }, status=200)
+
+        except Exception as e:
+            logger.exception("Critical error in execute endpoint")
+            return Response({
+                "status": "error",
+                "message": str(e)
+            }, status=500)
+
+api/urls.py
+Python
+
+from django.urls import path
+from .views import InfoAPIView, ExecuteCommandsAPIView
+
+urlpatterns = [
+    path('info/', InfoAPIView.as_view(), name='api-info'),
+    path('execute/', ExecuteCommandsAPIView.as_view(), name='execute-commands'),
+]
+
+Include in main urls.py
+Python
+
+# network_device_api/urls.py
+from django.contrib import admin
+from django.urls import path, include
+
+urlpatterns = [
+    path('admin/', admin.site.urls),
+    path('api/', include('api.urls')),
+]
+
+Key Differences & Improvements
+
+    Better structure with utils separation
+    Single execution function instead of four very similar ones
+    Better error handling & logging
+    Uses Django REST Framework (cleaner responses, parsers, etc.)
+    More maintainable and testable
+    File handling moved to utilities
+
+Next steps you may consider:
+
+    Add authentication (Token, JWT, API Key...)
+    Add rate limiting
+    Add request/response serializers (very recommended)
+    Add background task support (for very long commands) using Celery
+    Add input validation using DRF serializers
+    Add device type specific handling / prompt patterns presets
+
+Good luck with your network automation project! 🚀
+1.7s
+
+help me to call api
+
+Here are the most common and practical ways how you can call your new Django API (based on the code we converted):
+Method	Best for	Ease of use	Recommended for you?
+Postman / Insomnia	Testing & development	★★★★★	Yes – start here
+curl	Quick terminal tests, scripts	★★★★	Yes
+Python requests	Automation, scripts, integration	★★★★	Very useful
+Python httpx	Modern async alternative	★★★★	Good if you want async
+JavaScript (fetch)	Frontend / React / Vue	★★★	If you build web UI
+JavaScript (axios)	Frontend with nicer API	★★★★	Popular choice
+1. Quick Testing with curl (Recommended for fast check)
+Bash
+
+# 1. Check info endpoint (GET)
+curl http://127.0.0.1:8000/api/info/
+
+# 2. Execute commands (POST) - minimal example
+curl -X POST http://127.0.0.1:8000/api/execute/ \
+  -H "Content-Type: application/json" \
+  -d '{
+    "cmts_device": {
+      "host": "192.168.1.55",
+      "device_type": "cisco_ios",
+      "username": "admin",
+      "password": "cisco123",
+      "secret": "cisco123",
+      "port": 22
+    },
+    "commands": [
+      "show version",
+      "show ip interface brief"
+    ],
+    "login_type": "ssh",
+    "regexPattern": "[>#]",
+    "lineSeperator": "@@@@@"
+  }'
+
+Tip: Use -v or --verbose with curl if you want to see headers and full response
+2. Using Postman (Strongly recommended for development)
+
+    Create new request → POST
+    URL: http://127.0.0.1:8000/api/execute/
+    Headers → Add:
+    text
+
+    Content-Type: application/json
+
+    Body → raw → JSON
+    Paste example payload:
+
+JSON
+
+{
+  "cmts_device": {
+    "host": "10.10.10.5",
+    "device_type": "cisco_ios_telnet",
+    "username": "admin",
+    "password": "yourpassword",
+    "secret": "enablepass",
+    "port": 23
+  },
+  "commands": [
+    "terminal length 0",
+    "show version",
+    "show running-config | include hostname"
+  ],
+  "login_type": "telnet",
+  "regexPattern": "[>#]",
+  "lineSeperator": " ||| "
+}
+
+    Press Send → you should see status: "success" + outputs
+
+3. Python - using requests (very common in automation)
+Python
+
+import requests
+import json
+
+payload = {
+    "cmts_device": {
+        "host": "192.168.88.55",
+        "device_type": "cisco_ios",
+        "username": "admin",
+        "password": "cisco123",
+        "secret": "cisco123",
+        "port": 22,
+        "global_delay_factor": 2
+    },
+    "commands": [
+        "terminal length 0",
+        "show version",
+        "show ip arp | include 10.10.10"
+    ],
+    "login_type": "ssh",
+    "regexPattern": "[>#]",
+    "lineSeperator": "@@@@@"
+}
+
+url = "http://127.0.0.1:8000/api/execute/"
+
+try:
+    response = requests.post(url, json=payload, timeout=120)
+    response.raise_for_status()  # raise exception for bad status codes
+    
+    data = response.json()
+    
+    print("Status:", data.get("status"))
+    print("Host:", data.get("host"))
+    print(f"Executed {data.get('command_count')} commands\n")
+    
+    for i, output in enumerate(data.get("outputs", []), 1):
+        print(f"--- Output {i} ---")
+        print(output)
+        print("-"*60)
+
+except requests.exceptions.RequestException as e:
+    print("Error:", str(e))
+    if hasattr(e.response, 'text'):
+        print("Server response:", e.response.text)
+
+Quick Checklist – Most Common Problems
+Problem	Most likely cause	Fix suggestion
+400 Bad Request	Wrong JSON structure / missing fields	Compare with /info/ response
+Connection timeout	Wrong IP / firewall / device unreachable	Ping the device first
+Authentication failed	Wrong username/password/secret	Double-check credentials
+500 Internal Server Error	Netmiko error (look in logs/cmts_api.log)	Check server logs
+Empty outputs	Wrong prompt pattern / command too fast	Try "regexPattern": "[>#]$"
+
+Which method would you like to try first?
+(Postman / curl / python requests / something else?)
+
+And do you want to test telnet, ssh, OLT or all of them? 😄
+1.4s
+
+now i want to connect oracle db
+ 
+REPORTS_DB_URL=jdbc:oracle:thin:@172.20.20.24:1213/misdb
+REPORTS_DB_USERNAME=reports
+REPORTS_DB_PASSWORD=2322
+
+Here are the recommended modern ways (as of 2026) to connect to your Oracle database from Python using the connection information you provided:
+text
+
+REPORTS_DB_URL=jdbc:oracle:thin:@172.20.20.24:1213/misdb
+REPORTS_DB_USERNAME=reports
+REPORTS_DB_PASSWORD=2322
+
+Best & Recommended Approach (2025–2026) → Use python-oracledb (native driver)
+
+python-oracledb is the official successor to cx_Oracle and is strongly recommended for all new projects.
+Option 1 – Easiest & Most Recommended (Thin mode – no Oracle client needed)
+Python
+
+# pip install oracledb
+
+import oracledb
+
+try:
+    # Format:  user / password @ host : port / service_name
+    connection = oracledb.connect(
+        user="reports",
+        password="2322",
+        dsn="172.20.20.24:1213/misdb"
+    )
+
+    print("Successfully connected to Oracle!")
+    print("Database version:", connection.version)
+
+    # Example query
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT * FROM dual")
+        result = cursor.fetchone()
+        print("Result from DUAL:", result)
+
+except oracledb.Error as error:
+    print("Error connecting to Oracle:", error)
+finally:
+    if 'connection' in locals():
+        connection.close()
+
+Advantages:
+
+    No Oracle Instant Client installation needed
+    Works very well in Docker, cloud functions, etc.
+    Fast & lightweight
+
+Option 2 – If you already have / want to use Oracle Client (Thick mode)
+Python
+
+import oracledb
+
+oracledb.init_oracle_client()  # ← only needed if libraries are not in PATH
+
+connection = oracledb.connect(
+    user="reports",
+    password="2322",
+    dsn="172.20.20.24:1213/misdb"
+)
+
+If you really want to use the exact JDBC URL style
+
+python-oracledb does not accept JDBC URLs directly.
+
+You have two realistic options:
+A. Parse the JDBC URL yourself (clean & simple)
+Python
+
+import oracledb
+import re
+
+jdbc_url = "jdbc:oracle:thin:@172.20.20.24:1213/misdb"
+
+# Very simple parser for your format
+match = re.match(r"jdbc:oracle:thin:@([^:]+):(\d+)/(.+)", jdbc_url)
+if not match:
+    raise ValueError("Unsupported JDBC URL format")
+
+host, port, service_name = match.groups()
+
+connection = oracledb.connect(
+    user="reports",
+    password="2322",
+    dsn=f"{host}:{port}/{service_name}"
+)
+
+B. Use Java bridge → jaydebeapi + JDBC driver (much heavier)
+
+Only do this if you must use JDBC URL / same driver as Java application.
+Bash
+
+pip install JayDeBeApi JPype1
+
+Python
+
+import jaydebeapi
+
+jdbc_url = "jdbc:oracle:thin:@172.20.20.24:1213/misdb"
+driver_class = "oracle.jdbc.OracleDriver"
+jar_path = "/path/to/ojdbc11.jar"   # Download from Oracle (ojdbc11.jar or ojdbc8.jar)
+
+conn = jaydebeapi.connect(
+    driver_class,
+    jdbc_url,
+    ["reports", "2322"],
+    jar_path
+)
+
+curs = conn.cursor()
+curs.execute("SELECT * FROM dual")
+print(curs.fetchall())
+
+conn.close()
+
+Downsides:
+
+    Needs Java + JDBC driver jar
+    Much slower
+    Harder to deploy
+    Not recommended unless you have very special requirements
+
+Quick Recommendation Table (Jan 2026)
+Method	Needs Oracle Client?	Needs Java/JDBC jar?	Performance	Ease of deploy	Recommendation
+oracledb – Thin mode	No	No	★★★★★	★★★★★	★★★★★ Best choice
+oracledb – Thick mode	Yes	No	★★★★	★★★	Good if needed
+jaydebeapi + JDBC	No	Yes	★★	★	Only if forced
+SQLAlchemy + oracledb	Same as above	—	★★★★	★★★★	If using ORM
+
+Most people in 2025–2026 → just use:
+Bash
+
+pip install oracledb
+
+…and the first code example I showed.
+
+Good luck with your Oracle → Python integration!
+Let me know if you get any specific error message — we'll debug it together.
+2.2s
+Web page favicon
+Web page favicon
+Web page favicon
+20 sources
+
+with select and insert query on table
+
+Here are several practical examples of SELECT + INSERT patterns commonly used when working with Oracle databases (using Python + oracledb):
+1. Most Common Pattern: Copy/Transform rows from one table to another
+Python
+
+import oracledb
+
+try:
+    connection = oracledb.connect(
+        user="reports",
+        password="2322",
+        dsn="172.20.20.24:1213/misdb"
+    )
+    
+    cursor = connection.cursor()
+
+    # Pattern 1 - Simple copy with some transformation
+    cursor.execute("""
+        INSERT INTO target_table (
+            id, 
+            customer_name, 
+            amount, 
+            record_date, 
+            status_flag
+        )
+        SELECT 
+            id,
+            UPPER(customer_name) as customer_name,
+            amount * 1.18 as amount_with_tax,
+            record_date,
+            'PROCESSED' as status_flag
+        FROM source_table
+        WHERE record_date >= TRUNC(SYSDATE) - 30
+          AND status = 'PENDING'
+    """)
+
+    connection.commit()
+    print(f"Rows inserted: {cursor.rowcount}")
+
+except oracledb.Error as error:
+    print("Error:", error)
+    connection.rollback()
+finally:
+    cursor.close()
+    connection.close()
+
+2. Insert from SELECT + some calculation/sequence
+SQL
+
+INSERT INTO daily_summary (
+    summary_date,
+    branch_id,
+    total_sales,
+    total_transactions,
+    avg_transaction_value,
+    created_at
+)
+SELECT 
+    TRUNC(transaction_date) as summary_date,
+    branch_id,
+    SUM(sale_amount) as total_sales,
+    COUNT(*) as total_transactions,
+    ROUND(AVG(sale_amount), 2) as avg_transaction_value,
+    SYSDATE as created_at
+FROM transactions
+WHERE transaction_date >= TRUNC(SYSDATE) - 7
+GROUP BY TRUNC(transaction_date), branch_id
+
+3. Insert only new/changed records (using MERGE or NOT EXISTS)
+Python
+
+# Using NOT EXISTS (simple & readable)
+cursor.execute("""
+    INSERT INTO target_history (id, name, amount, change_date)
+    SELECT 
+        s.id,
+        s.name,
+        s.amount,
+        SYSDATE
+    FROM source_table s
+    WHERE NOT EXISTS (
+        SELECT 1 
+        FROM target_history t 
+        WHERE t.id = s.id 
+          AND t.change_date = TRUNC(SYSDATE)
+    )
+""")
+
+Alternative using MERGE (very powerful & usually fastest):
+SQL
+
+MERGE INTO target_table t
+USING (
+    SELECT id, name, status, amount, last_modified
+    FROM source_table
+    WHERE last_modified > :last_run_time
+) s
+ON (t.id = s.id)
+WHEN MATCHED THEN
+    UPDATE SET
+        t.status = s.status,
+        t.amount = s.amount,
+        t.last_modified = s.last_modified
+WHEN NOT MATCHED THEN
+    INSERT (id, name, status, amount, last_modified)
+    VALUES (s.id, s.name, s.status, s.amount, s.last_modified)
+
+Python version with bind variable:
+Python
+
+from datetime import datetime, timedelta
+
+last_run = datetime.now() - timedelta(days=1)
+
+cursor.execute("""
+    MERGE INTO target_table t
+    USING (
+        SELECT id, name, status, amount, last_modified
+        FROM source_table
+        WHERE last_modified > :last_run
+    ) s
+    ON (t.id = s.id)
+    WHEN MATCHED THEN
+        UPDATE SET
+            t.status = s.status,
+            t.amount = s.amount,
+            t.last_modified = s.last_modified
+    WHEN NOT MATCHED THEN
+        INSERT (id, name, status, amount, last_modified)
+        VALUES (s.id, s.name, s.status, s.amount, s.last_modified)
+""", last_run=last_run)
+
+Quick Reference Table - Popular Patterns
+Goal	Recommended Approach	Performance	Complexity
+Simple copy all rows	INSERT INTO ... SELECT *	★★★★★	★
+Copy with filter + transformation	INSERT ... SELECT ... WHERE	★★★★	★★
+Daily summary / aggregation	INSERT ... SELECT ... GROUP BY	★★★★	★★★
+Upsert (update or insert)	MERGE statement	★★★★★	★★★★
+Insert only new records	INSERT ... WHERE NOT EXISTS	★★★★	★★
+Insert only changed records	MERGE or INSERT + NOT EXISTS	★★★★	★★★
+Copy between schemas	INSERT INTO schema2.t SELECT * FROM schema1.t	★★★★	★
+
+Which of these patterns is closest to what you want to achieve?
+
+If you can tell me:
+
+    Source table name
+    Target table name
+    Main columns you want to transfer
+    Any conditions/filters
+    Whether you need to avoid duplicates
+
+...I can give you a much more precise query for your exact case.
+2s
+
+in current django where to put
+
+Where to put Oracle database connection code in a current Django project?
+(2025–2026 best practices)
+
+Here are the most common and recommended places depending on how and when you want to use the Oracle connection:
+#	Where to put the code	When to use it	Pros	Cons / Limitations	Recommended for
+1	settings.py → DATABASES configuration	Normal Django ORM usage	Cleanest, standard Django way	Only for Django models / ORM	★★★★★ Most projects
+2	Custom database backend (inherits from oracledb)	Special connection pooling / tweaks	Full control over connection	Quite complex to implement	Advanced cases
+3	Utility module (e.g. utils/db.py or core/db.py)	Raw SQL queries, scripts, management commands	Simple, reusable, no ORM needed	You manage connections yourself	Your current case (probably best)
+4	Django management command	Periodic jobs, one-time data migrations	Clean separation	Not suitable for views/services	Batch processing
+5	Celery task / Background task	Long running / async processing	Doesn't block web requests	Requires Celery setup	Heavy processing
+6	Custom context processor / middleware	Very rare – per request connection	—	Very bad practice (connection per request)	Almost never
+Most Recommended for Your Situation (raw select + insert)
+Bash
+
+your_project/
+├── your_project/
+│   ├── __init__.py
+│   ├── settings.py
+│   ├── urls.py
+│   └── ...
+├── api/                    ← your existing app
+├── utils/                  ← ← ← create this folder (recommended)
+│   ├── __init__.py
+│   ├── db.py               ← ← ← put Oracle raw connection here
+│   └── ...
+└── manage.py
+
+utils/db.py – Recommended pattern (2025–2026 style)
+Python
+
+# utils/db.py
+import oracledb
+from django.conf import settings
+from contextlib import contextmanager
+import logging
+
+logger = logging.getLogger(__name__)
+
+# Option A: Use credentials directly (less secure, but simple)
+# CONNECTION_PARAMS = {
+#     "user": "reports",
+#     "password": "2322",
+#     "dsn": "172.20.20.24:1213/misdb"
+# }
+
+# Option B: Better – store in Django settings (recommended)
+# settings.py:
+# ORACLE_DB = {
+#     'USER': 'reports',
+#     'PASSWORD': '2322',
+#     'HOST': '172.20.20.24',
+#     'PORT': 1213,
+#     'SERVICE_NAME': 'misdb'
+# }
+
+@contextmanager
+def get_oracle_connection():
+    """Context manager for safe Oracle connection handling"""
+    conn = None
+    try:
+        # Modern way - using service name (preferred)
+        conn = oracledb.connect(
+            user=settings.ORACLE_DB['USER'],
+            password=settings.ORACLE_DB['PASSWORD'],
+            dsn=f"{settings.ORACLE_DB['HOST']}:{settings.ORACLE_DB['PORT']}/{settings.ORACLE_DB['SERVICE_NAME']}"
+            # min=1, max=10, increment=1   ← you can add pool if needed
+        )
+        logger.debug("Oracle connection opened")
+        yield conn
+    except oracledb.Error as e:
+        logger.error(f"Oracle connection failed: {e}")
+        raise
+    finally:
+        if conn:
+            try:
+                conn.close()
+                logger.debug("Oracle connection closed")
+            except:
+                pass
+
+
+# Example usage in views.py / services / anywhere
+def some_business_function():
+    with get_oracle_connection() as conn:
+        cursor = conn.cursor()
+        
+        # SELECT example
+        cursor.execute("""
+            SELECT id, name, amount 
+            FROM transactions 
+            WHERE status = 'PENDING' 
+            AND created_at > SYSDATE - 7
+        """)
+        rows = cursor.fetchall()
+        
+        # INSERT example
+        cursor.execute("""
+            INSERT INTO processed_logs (transaction_id, processed_at, status)
+            VALUES (:1, SYSDATE, 'SUCCESS')
+        """, [12345])
+        
+        conn.commit()           # very important!
+
+Quick Summary – What to choose in 2026
+text
+
+You want to do raw SELECT + INSERT                  →   utils/db.py + context manager     (recommended)
+You use Django models mapped to Oracle tables       →   settings.DATABASES['oracle']      (cleanest)
+You need connection pooling for high load           →   oracledb.create_pool() in utils
+You do one-time migration / report generation       →   custom management command
+You do heavy background processing                  →   Celery task + utils/db.py
+
+Most probably for your current situation
+→ create utils/db.py with context manager
+→ put credentials in settings.py (or better – environment variables)
+→ import and use with get_oracle_connection() as conn: wherever you need raw SQL
+
+Would you like me to show you:
+
+    settings.py version?
+    environment variables version (most secure)?
+    how to use it inside a Django view?
+    how to make simple connection pool?
+
+1.7s
+
+settings.ORACLE_DB['USER']
+ 
+ 
+how to resolve this variables
+
+settings.ORACLE_DB['USER'] is not automatically available in Django.
+
+This is something you have to define yourself — Django does not create ORACLE_DB dictionary automatically.
+
+Here are the most common and recommended ways to solve this problem in 2025–2026 Django projects:
+1. Best & Recommended Way (Most Secure) — Use Environment Variables + django-environ
+Bash
+
+# 1. Install (if you haven't already)
+pip install django-environ
+
+Python
+
+# your_project/settings.py
+
+import environ
+from pathlib import Path
+
+env = environ.Env()
+environ.Env.read_env()   # reads .env file (if exists)
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+
+# ───────────────────────────────────────────────
+# Oracle Database credentials (recommended way)
+# ───────────────────────────────────────────────
+ORACLE_DB = {
+    'USER': env('ORACLE_USER', default='reports'),
+    'PASSWORD': env('ORACLE_PASSWORD', default='2322'),
+    'HOST': env('ORACLE_HOST', default='172.20.20.24'),
+    'PORT': env('ORACLE_PORT', default=1213, cast=int),
+    'SERVICE_NAME': env('ORACLE_SERVICE_NAME', default='misdb'),
+}
+
+Bash
+
+# .env    ← create this file in project root (very important: add to .gitignore!)
+ORACLE_USER=reports
+ORACLE_PASSWORD=2322
+ORACLE_HOST=172.20.20.24
+ORACLE_PORT=1213
+ORACLE_SERVICE_NAME=misdb
+
+Now you can safely use:
+Python
+
+from django.conf import settings
+
+with get_oracle_connection() as conn:
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM dual")
+
+2. Quick & Dirty (Only for local development — not recommended in production)
+Python
+
+# settings.py
+
+ORACLE_DB = {
+    'USER': 'reports',
+    'PASSWORD': '2322',
+    'HOST': '172.20.20.24',
+    'PORT': 1213,
+    'SERVICE_NAME': 'misdb',
+}
+
+→ Very fast, but password is visible in source code — never do this in git repository!
+3. If you want to use it together with Django's DATABASES (two different approaches)
+Python
+
+# settings.py
+
+DATABASES = {
+    'default': {
+        'ENGINE': 'django.db.backends.sqlite3',
+        'NAME': BASE_DIR / 'db.sqlite3',
+    },
+    
+    'oracle': {
+        'ENGINE': 'django.db.backends.oracle',
+        'NAME': '172.20.20.24:1213/misdb',   # or use (host, port, service_name) tuple
+        'USER': 'reports',
+        'PASSWORD': '2322',
+        'HOST': '172.20.20.24',
+        'PORT': '1213',
+    }
+}
+
+# For raw connection — you can still use separate ORACLE_DB dict
+ORACLE_DB = DATABASES['oracle'].copy()   # reuse same credentials
+
+Summary Table — Choose your style
+Method	Security	Ease of use	Production Ready	Recommended
+Hardcoded in settings.py	★	★★★★★	No	Never
+django-environ + .env	★★★★★	★★★★	Yes	★★★★★
+python-decouple + .env	★★★★★	★★★★	Yes	Very good
+Secrets from vault / AWS SSM	★★★★★	★★	Yes	Enterprise
+Same as DATABASES['oracle']	★★★★	★★★★	Yes	Good
+
+Quick action plan (most people choose this in 2026):
+
+    pip install django-environ
+    Create .env file in project root
+    Add the 5 lines shown above to .env
+    Put the env = environ.Env() + ORACLE_DB = { ... } code in settings.py
+    Add .env to .gitignore
+    Use settings.ORACLE_DB['USER'] normally
+
+Let me know which approach you prefer — I can give you the exact code block for your project style!
+1.9s
+
+now how to call this json
+ 
+DATABASES = { 'default': { 'ENGINE': 'django.db.backends.sqlite3', 'NAME': BASE_DIR / 'db.sqlite3', },
+    'oracle': { 'ENGINE': 'django.db.backends.oracle', 'NAME': '172.20.20.24:1213/misdb', # or use (host, port, service_name) tuple 'USER': 'reports', 'PASSWORD': '2322', 'HOST': '172.20.20.24', 'PORT': '1213', } }
+ 
+db.py
+
+Here are the most common and practical ways to use / call / access
+the Oracle database you configured in settings.py → DATABASES['oracle']
+1. Using Django ORM (recommended if you have models)
+Python
+
+# In any file (views.py, services, management command, etc.)
+
+from django.db import connections
+
+# Get cursor from oracle connection
+with connections['oracle'].cursor() as cursor:
+    cursor.execute("SELECT * FROM your_table WHERE id = :1", [123])
+    rows = cursor.fetchall()
+    
+    for row in rows:
+        print(row)
+
+Python
+
+# Or using raw SQL with connection
+with connections['oracle'].cursor() as cursor:
+    cursor.execute("""
+        INSERT INTO some_table (col1, col2, created_at)
+        VALUES (:1, :2, SYSDATE)
+    """, ['value1', 999])
+    
+    connections['oracle'].commit()   # ! important !
+
+2. Using raw oracledb connection (most flexible – recommended for your case)
+Python
+
+# utils/db.py   ← recommended place
+
+import oracledb
+from django.conf import settings
+from contextlib import contextmanager
+
+@contextmanager
+def get_oracle_cursor():
+    """
+    Returns cursor from the same connection that Django uses
+    (uses connection pooling if Django is configured properly)
+    """
+    conn = None
+    try:
+        # This uses the exact same credentials as in settings.DATABASES['oracle']
+        conn = connections['oracle'].get_new_connection()
+        cursor = conn.cursor()
+        yield cursor, conn
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            # Don't close connection - Django's connection pool will handle it
+            pass
+
+
+# Usage example anywhere in project
+def some_function():
+    try:
+        with get_oracle_cursor() as (cursor, conn):
+            cursor.execute("""
+                SELECT id, name, amount 
+                FROM transactions 
+                WHERE status = 'PENDING'
+            """)
+            rows = cursor.fetchall()
+
+            # Do something with data...
+            
+            # Insert example
+            cursor.execute("""
+                INSERT INTO processed_logs (trans_id, processed_date, status)
+                VALUES (:1, SYSDATE, :2)
+            """, [1001, 'SUCCESS'])
+            
+            conn.commit()                    # ← very important!
+            
+    except oracledb.Error as error:
+        print("Oracle error:", error)
+        if 'conn' in locals():
