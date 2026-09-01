@@ -1,4 +1,6 @@
 # utils/db.py
+import sys
+
 import oracledb
 from django.conf import settings
 from contextlib import contextmanager
@@ -37,7 +39,13 @@ def get_oracle_connection():
     conn = None
     try:
         # Modern way - using service name (preferred)
-        oracledb.init_oracle_client()
+        #oracledb.init_oracle_client()
+        # Initialize Oracle client ONCE at module level (not inside the function)
+        if sys.platform == "win32":
+            oracledb.init_oracle_client(lib_dir=r"C:\instantclient-basic-windows\instantclient_23_0")
+        else:
+            oracledb.init_oracle_client()  # Linux: uses system-installed client
+        logger.info(f"Oracle connection opened for platform {sys.platform}")
         conn = oracledb.connect(
             user=settings.DATABASES['oracle']['USER'],
             password=settings.DATABASES['oracle']['PASSWORD'],
@@ -69,34 +77,365 @@ def get_oracle_connection_simple():
         retry_delay=2
     )
 
-# Example usage in views.py / services / anywhere
-def some_business_function():
-    with get_oracle_connection() as conn:
-        cursor = conn.cursor()
-        
-        # SELECT example
-        cursor.execute("""
-            SELECT id, name, amount 
-            FROM transactions 
-            WHERE status = 'PENDING' 
-            AND created_at > SYSDATE - 7
-        """)
-        rows = cursor.fetchall()
-        
-        # INSERT example
-        cursor.execute("""
-            INSERT INTO processed_logs (transaction_id, processed_at, status)
-            VALUES (:1, SYSDATE, 'SUCCESS')
-        """, [12345])
-        
-        conn.commit()           # very important!
-      
 
-def get_sequence_id(cursor, seq_name: str = "ONU_ACTIVITY_LOG_DETAILS_SEQ") -> int:
+def get_sequence_id(cursor, seq_name: str = "UAT_ONU_ACT_LOG_DETAILS_SEQ") -> int:
     """Standalone way to get next sequence value as int"""
     cursor.execute(f"SELECT {seq_name}.NEXTVAL FROM DUAL")
     return int(cursor.fetchone()[0])  # always returns NUMBER → safe to int()
+
+def get_template_mst( cursor, template_name ):
+    """ select data from pya_config_master """
+    config_mst_query="""
+        SELECT 
+            LOGIN_TYPE,
+            USERNAME,
+            PASSWORD,
+            TEMPLATE_ID,
+            SECRET,
+            GLOBAL_DELAY_FACTOR,
+            PORT,
+            ENABLE_CUSTOM,
+            LINE_SEPERATOR,
+            HOST,
+            DEVICE_TYPE,
+            TEMPLATE_NAME
+        FROM PYA_TMP_MASTER
+        WHERE TEMPLATE_NAME = :template_name
+    """
+    try:
+        cursor.execute(config_mst_query, template_name=template_name)
+        rows = cursor.fetchall()
+        
+        if not rows:
+            raise ValueError(f"No templates found for TEMPLATE_NAME = {template_name!r}")
+
+        logger.debug(f"Loaded {len(rows)} template(s) for '{template_name}'")
+        return rows
+        
+    except Exception as e:
+        logger.error(f"Failed to fetch templates '{template_name}': {e}")
+        raise
+
+def upsert_nested_command_configurations(
+    template_id: int,
+    commands: str,
+    error_pattern: str = None,
+    success_pattern: str = None,
+    sequence: int = None
+    ) -> int:
+    """
+    UPSERT (update or insert) a row in PYA_NESTEST_CONFIGURATION based on TEMPLATE_ID.    
+    Returns: the TEMPLATE_ID (existing or newly created)
+    """
+    merge_sql = """
+    MERGE INTO PYA_NESTEST_CONFIGURATION t
+    USING (SELECT :template_id AS TEMPLATE_ID FROM dual) s
+    ON (t.TEMPLATE_ID = s.TEMPLATE_ID)
+        
+    WHEN MATCHED THEN
+    UPDATE SET
+        COMMANDS          = :commands,
+        ERROR_PATTERN     = :error_pattern,
+        SUCCESS_PATTERN   = :success_pattern,
+        SEQUENCE          = :sequence
+                
+    WHEN NOT MATCHED THEN
+        INSERT (
+        TEMPLATE_ID,
+        COMMANDS,
+        ERROR_PATTERN,
+        SUCCESS_PATTERN,
+        SEQUENCE
+        )
+        VALUES (
+        :template_id,
+        :commands,
+        :error_pattern,
+        :success_pattern,
+        :sequence
+        )
+    """
+        
+    with get_oracle_connection() as conn:
+        cursor = conn.cursor()
+        try:
+            bind_vars = {
+                'template_id': template_id,
+                'commands': commands,
+                'error_pattern': error_pattern,
+                'success_pattern': success_pattern,
+                'sequence': sequence,
+            }
+            _format_query_for_logging(merge_sql, bind_vars)
+            cursor.execute(merge_sql, bind_vars)
+            conn.commit()
+
+            action = "Updated" if cursor.rowcount > 0 else "Inserted"
+            logger.info(f"{action} nested configuration for TEMPLATE_ID = {template_id}")
+
+            return template_id
+
+        except Exception as e:
+            logger.error(f"Upsert failed for nested configuration TEMPLATE_ID '{template_id}': {e}")
+            raise
+
+def upsert_template_mst(
+    template_name: str,
+    login_type: str,
+    username: str,
+    password: str,
+    secret: str = None,
+    global_delay_factor: int = None,
+    port: int  = None,
+    enable_custom: str = None,       # e.g. 0/1 or 'Y'/'N'
+    line_seperator: str = None,            # note: typo in your column name?
+    host: str = None,
+    device_type: str = None
+    ) -> int:
+    """
+    UPSERT (update or insert) a row in PYA_TMP_MASTER based on TEMPLATE_NAME.
     
+    Returns: the TEMPLATE_ID (existing or newly created)
+    """
+    merge_sql = """
+    MERGE INTO PYA_TMP_MASTER t
+    USING (SELECT :template_name AS TEMPLATE_NAME FROM dual) s
+    ON (t.TEMPLATE_NAME = s.TEMPLATE_NAME)
+    
+    WHEN MATCHED THEN
+        UPDATE SET
+            LOGIN_TYPE           = :login_type,
+            USERNAME             = :username,
+            PASSWORD             = :password,
+            SECRET               = :secret,
+            GLOBAL_DELAY_FACTOR  = :global_delay_factor,
+            PORT                 = :port,
+            ENABLE_CUSTOM        = :enable_custom,
+            LINE_SEPERATOR       = :line_seperator,
+            HOST                 = :host,
+            DEVICE_TYPE          = :device_type
+            -- Add audit columns if they exist, e.g.:
+            -- LAST_UPDATED = SYSDATE,
+            -- UPDATED_BY   = USER
+            
+    WHEN NOT MATCHED THEN
+        INSERT (
+            
+            LOGIN_TYPE,
+            USERNAME,
+            PASSWORD,
+            SECRET,
+            GLOBAL_DELAY_FACTOR,
+            PORT,
+            ENABLE_CUSTOM,
+            LINE_SEPERATOR,
+            HOST,
+            DEVICE_TYPE,
+            TEMPLATE_NAME
+            -- CREATED_AT, CREATED_BY   -- if present
+        )
+        VALUES (
+            :login_type,
+            :username,
+            :password,
+            :secret,
+            :global_delay_factor,
+            :port,
+            :enable_custom,
+            :line_seperator,
+            :host,
+            :device_type,
+            :template_name
+        )
+    """
+    with get_oracle_connection() as conn:
+        cursor = conn.cursor()
+        try:
+            bind_vars = {
+                'template_name': template_name,
+                'login_type': login_type,
+                'username': username,
+                'password': password,
+                'secret': secret,
+                'global_delay_factor': global_delay_factor,
+                'port': port,
+                'enable_custom': enable_custom,
+                'line_seperator': line_seperator,     # careful with spelling
+                'host': host,
+                'device_type': device_type,
+            }
+            _format_query_for_logging(merge_sql, bind_vars)
+            cursor.execute(merge_sql, bind_vars)
+            conn.commit()
+            bind_vars1 = { 'tn' : template_name}
+            # Retrieve the TEMPLATE_ID after the operation (most reliable way)
+            cursor.execute(
+                """
+                SELECT TEMPLATE_ID 
+                FROM PYA_TMP_MASTER 
+                WHERE TEMPLATE_NAME = :tn
+                """,
+                bind_vars1
+            )
+            template_id = cursor.fetchone()[0]
+
+            action = "Updated" if cursor.rowcount > 0 else "Inserted"  # rowcount from MERGE
+            logger.info(f"{action} template '{template_name}' TEMPLATE_ID = {template_id}")
+
+            return template_id
+
+        except Exception as e:
+            logger.error(f"Upsert failed for template '{template_name}': {e}")
+            raise
+
+        
+def get_command_configuration( cursor, command_name ):
+    """ select data from pya_config_master """
+    config_mst_query="""
+        SELECT 
+            CONFIG_ID,
+            TEMPLATE_ID,
+            COMMANDS,
+            SUCCESS_RESPONSE,
+            ERROR_RESPONSE,
+            COMMAND_NAME,
+            COMMAND_PURPOSE,
+            ERROR_RESPONSE_PATTERN,
+            SUCCESS_RESPONSE_PATTERN,
+            DEVICE_NAME
+        FROM PYA_COMMAND_CONFIGURATION
+        WHERE COMMAND_NAME = :command_name
+    """
+    try:
+        cursor.execute(config_mst_query, command_name=command_name)
+        rows = cursor.fetchall()
+        
+        if not rows:
+            raise ValueError(f"No commands found for command name = {command_name!r}")
+
+        logger.debug(f"Loaded {len(rows)} commands(s) for '{command_name}'")
+        return rows
+        
+    except Exception as e:
+        logger.error(f"Failed to fetch command '{command_name}': {e}")
+        raise
+
+def _format_query_for_logging(sql: str, bind_vars: dict) -> str:
+    """Format SQL with bind variables for logging purposes only."""
+    formatted = sql
+    for key, value in bind_vars.items():
+        placeholder = f":{key}"
+        if value is None:
+            replacement = "NULL"
+        elif isinstance(value, str):
+            replacement = f"'{value}'"
+        else:
+            replacement = str(value)
+        formatted = formatted.replace(placeholder, replacement)
+        logger.debug(f"Formatted SQL: {formatted}")
+
+def upsert_command_configuration(
+    command_name: str,
+    template_id: int,
+    commands: str,
+    success_response: str = None,
+    error_response: str = None,
+    command_purpose: str = None,
+    error_resp_pattern: str = None,
+    success_resp_pattern: str = None,
+    device_name: str = None
+) -> int:
+    """
+    Insert new command configuration or update existing one (UPSERT).
+    
+    Matching is done on COMMAND_NAME (assumed unique or primary/business key).
+    
+    Returns: the CONFIG_ID (newly inserted or existing)
+    """
+    merge_sql = """
+    MERGE INTO PYA_COMMAND_CONFIGURATION t
+    USING (SELECT :command_name AS COMMAND_NAME FROM dual) s
+    ON (t.COMMAND_NAME = s.COMMAND_NAME)
+    
+    WHEN MATCHED THEN
+        UPDATE SET
+            TEMPLATE_ID             = :template_id,
+            COMMANDS                = :commands,
+            SUCCESS_RESPONSE        = :success_response,
+            ERROR_RESPONSE          = :error_response,
+            COMMAND_PURPOSE         = :command_purpose,
+            ERROR_RESPONSE_PATTERN  = :error_resp_pattern,
+            SUCCESS_RESPONSE_PATTERN = :success_resp_pattern,
+            DEVICE_NAME             = :device_name
+            -- LAST_UPDATED = SYSDATE,   -- uncomment if you have audit column
+            -- UPDATED_BY   = USER       -- optional
+        WHERE t.COMMAND_NAME = :command_name  -- safety
+            
+    WHEN NOT MATCHED THEN
+        INSERT (
+            CONFIG_ID,
+            TEMPLATE_ID,
+            COMMANDS,
+            SUCCESS_RESPONSE,
+            ERROR_RESPONSE,
+            COMMAND_NAME,
+            COMMAND_PURPOSE,
+            ERROR_RESPONSE_PATTERN,
+            SUCCESS_RESPONSE_PATTERN,
+            DEVICE_NAME
+            -- CREATED_AT, CREATED_BY   -- if you have them
+        )
+        VALUES (
+            PYA_COMMAND_CONFIG_SEQ.NEXTVAL,   -- assuming you have a sequence
+            :template_id,
+            :commands,
+            :success_response,
+            :error_response,
+            :command_name,
+            :command_purpose,
+            :error_resp_pattern,
+            :success_resp_pattern,
+            :device_name
+        )
+    """
+    #logger.info(f"merge_sql : {merge_sql}")
+    with get_oracle_connection() as conn:
+        cursor = conn.cursor()
+        try:
+            bind_vars = {
+            'command_name': command_name,
+            'template_id': template_id,
+            'commands': commands,
+            'success_response': success_response,
+            'error_response': error_response,
+            'command_purpose': command_purpose,
+            'error_resp_pattern': error_resp_pattern,
+            'success_resp_pattern': success_resp_pattern,
+            'device_name': device_name,
+            }
+            #formatted_sql = _format_query_for_logging(merge_sql, bind_vars)
+            cursor.execute(merge_sql,bind_vars)
+            # ── Get the CONFIG_ID after merge ────────────────────────────────
+            # Option A: query it back (most reliable)
+            bind_vars1 = { 'cmd_name' : command_name}
+            conn.commit()
+            merge_sql1 = """
+                SELECT CONFIG_ID 
+                FROM PYA_COMMAND_CONFIGURATION 
+                WHERE COMMAND_NAME = :cmd_name
+                """
+            cursor.execute(merge_sql1,bind_vars1)
+            #formatted_sql = _format_query_for_logging(merge_sql1, bind_vars1)
+            config_id = cursor.fetchone()[0]
+            logger.info(
+                f"{'Updated' if cursor.rowcount > 0 else 'Inserted'} command configuration ")
+            logger.info( f"for '{command_name}' CONFIG_ID = {config_id}")
+            return config_id
+        
+        except Exception as e:
+            logger.error(f"Upsert failed for command '{command_name}': {e}", exc_info=True)
+            raise
+
 def insert_onu_activity_log(
     onu_activity_ts: str,
     onu_activity_name: str,
@@ -119,12 +458,12 @@ def insert_onu_activity_log(
     auto_commit: bool = True
 ) -> int:
     """
-    Insert a record into REPORTS.ONU_ACTIVITY_LOG_DETAILS
+    Insert a record into REPORTS.UAT_ONU_ACTIVITY_LOG_DETAILS
     Returns the generated ONU_ACTIVITY_LOG_ID (from sequence)
     """
     
     sql = """
-    INSERT INTO REPORTS.ONU_ACTIVITY_LOG_DETAILS (
+    INSERT INTO REPORTS.UAT_ONU_ACTIVITY_LOG_DETAILS (
         ONU_ACTIVITY_LOG_ID,
         ONU_ACTIVITY_NAME,
         ONU_COMMAND,
@@ -214,4 +553,224 @@ def insert_onu_activity_log(
         logger.error(f"Failed to insert ONU activity log: {e}", exc_info=True)
         if 'conn' in locals() and conn:
             conn.rollback()
+        raise
+
+def get_command_with_template( command_name: str) -> dict:
+    """
+    Fetch command configuration with associated template details.
+    
+    Returns: dict with 'command' and 'template' keys, or None if not found
+    """
+    query = """
+            SELECT
+                CF.CONFIG_ID,
+                CF.TEMPLATE_ID,
+                CF.COMMANDS,
+                CF.SUCCESS_RESPONSE,
+                CF.ERROR_RESPONSE,
+                CF.COMMAND_NAME,
+                CF.COMMAND_PURPOSE,
+                CF.ERROR_RESPONSE_PATTERN,
+                CF.SUCCESS_RESPONSE_PATTERN,
+                CF.DEVICE_NAME,
+                CF.NESTED_TEMPLATE_ID ,
+                CF.NESTED_FLAG,
+                TP.TEMPLATE_ID,
+                TP.LOGIN_TYPE,
+                TP.USERNAME,
+                TP.PASSWORD,
+                TP.SECRET,
+                TP.GLOBAL_DELAY_FACTOR,
+                TP.PORT,
+                TP.ENABLE_CUSTOM,
+                TP.LINE_SEPERATOR,
+                TP.HOST,
+                TP.DEVICE_TYPE,
+                TP.TEMPLATE_NAME,
+                TP.TEMPLATE_EXPECT_STR,
+                TP.TIMEOUT
+            FROM
+                PYA_COMMAND_CONFIGURATION CF
+            INNER JOIN PYA_TMP_MASTER TP ON
+                TP.TEMPLATE_ID = CF.TEMPLATE_ID
+            WHERE
+                CF.COMMAND_NAME =  :command_name
+            ORDER BY CF.SEQUENCE
+    """
+    logger.info(f"query: {query}")
+    try:
+        with get_oracle_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(query, command_name=command_name)
+            row = cursor.fetchall()
+        
+            if not row:
+                raise ValueError(f"No command/template found for '{command_name}'")
+            
+            result = {
+                'commands': [
+                    {
+                        'config_id': r[0],
+                        'template_id': r[1],
+                        'commands': r[2],
+                        'success_response': r[3],
+                        'error_response': r[4],
+                        'command_name': r[5],
+                        'command_purpose': r[6],
+                        'error_response_pattern': r[7],
+                        'success_response_pattern': r[8],
+                        'device_name': r[9],
+                        'ns_flag':r[11],
+                        'ns_template_id':r[10]
+                    }
+                    for r in row
+                ],
+                'template': {
+                    'template_id': row[0][12],
+                    'login_type': row[0][13],
+                    'username': row[0][14],
+                    'password': row[0][15],
+                    'secret': row[0][16],
+                    'global_delay_factor': row[0][17],
+                    'port': row[0][18],
+                    'enable_custom': row[0][19],
+                    'line_separator': row[0][20],
+                    'host': row[0][21],
+                    'device_type': row[0][22],
+                    'template_name': row[0][23],
+                    'template_expect_str':row[0][24],
+                    'timeout':row[0][25]
+                }
+            }
+            logger.debug(f"Fetched command '{command_name}' with template")
+            return result
+        
+    except Exception as e:
+        logger.error(f"Failed to fetch command with template '{command_name}': {e}")
+        raise
+
+def get_nested_command_configuration_by_id( template_id: int ) -> dict:
+    """
+    Fetch nested command configuration by template_id.
+    
+    Returns: dict with nessted command configuration details
+    """
+    query = """
+       SELECT TEMPLATE_ID,COMMANDS,ERROR_PATTERN,SUCCESS_PATTERN,SEQUENCE FROM PYA_NESTEST_CONFIGURATION WHERE TEMPLATE_ID=:template_id
+    """
+    logger.debug(f"query: {query}")
+    try:
+        with get_oracle_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(query, template_id=template_id)
+            row = cursor.fetchall()
+        
+        if not row:
+            raise ValueError(f"No configuration found for TEMPLATE_ID = {template_id}")
+        
+        result = [ 
+            {
+            'TEMPLATE_ID': r[0],
+            'COMMANDS': r[1],
+            'ERROR_PATTERN': r[2],
+            'SUCCESS_PATTERN': r[3],
+            'SEQUENCE': r[4]
+            } for r in row
+        ]
+        
+        logger.debug(f"Fetched nested command configuration for TEMPLATE_ID = {template_id}")
+        return result
+        
+    except Exception as e:
+        logger.error(f"Failed to fetch nested configuration for TEMPLATE_ID = {template_id}: {e}")
+        raise
+
+
+def get_command_configuration_by_id( config_id: int ) -> dict:
+    """
+    Fetch command configuration by CONFIG_ID.
+    
+    Returns: dict with command configuration details
+    """
+    query = """
+    SELECT CONFIG_ID, TEMPLATE_ID, COMMANDS, SUCCESS_RESPONSE, ERROR_RESPONSE,
+           COMMAND_NAME, COMMAND_PURPOSE, ERROR_RESPONSE_PATTERN, 
+           SUCCESS_RESPONSE_PATTERN, DEVICE_NAME
+    FROM PYA_COMMAND_CONFIGURATION
+    WHERE CONFIG_ID = :config_id
+    """
+    
+    try:
+        with get_oracle_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(query, config_id=config_id)
+            row = cursor.fetchone()
+        
+        if not row:
+            raise ValueError(f"No configuration found for CONFIG_ID = {config_id}")
+        
+        result = {
+            'config_id': row[0],
+            'template_id': row[1],
+            'commands': row[2],
+            'success_response': row[3],
+            'error_response': row[4],
+            'command_name': row[5],
+            'command_purpose': row[6],
+            'error_response_pattern': row[7],
+            'success_response_pattern': row[8],
+            'device_name': row[9],
+        }
+        
+        logger.debug(f"Fetched command configuration for CONFIG_ID = {config_id}")
+        return result
+        
+    except Exception as e:
+        logger.error(f"Failed to fetch configuration for CONFIG_ID = {config_id}: {e}")
+        raise
+        
+def get_template_by_id( template_id: int) -> dict:
+    """
+    Fetch template details by TEMPLATE_ID.
+    
+    Returns: dict with template configuration or None if not found
+    """
+    query = """
+    SELECT TEMPLATE_ID, LOGIN_TYPE, USERNAME, PASSWORD, SECRET, 
+           GLOBAL_DELAY_FACTOR, PORT, ENABLE_CUSTOM, LINE_SEPERATOR, 
+           HOST, DEVICE_TYPE, TEMPLATE_NAME
+    FROM PYA_TMP_MASTER 
+    WHERE TEMPLATE_ID = :template_id
+    """
+    
+    try:
+        with get_oracle_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(query, template_id=template_id)
+            row = cursor.fetchone()
+        
+        if not row:
+            logger.warning(f"No template found for TEMPLATE_ID = {template_id}")
+            return None
+        
+        result = {
+            'template_id': row[0],
+            'login_type': row[1],
+            'username': row[2],
+            'password': row[3],
+            'secret': row[4],
+            'global_delay_factor': row[5],
+            'port': row[6],
+            'enable_custom': row[7],
+            'line_separator': row[8],
+            'host': row[9],
+            'device_type': row[10],
+            'template_name': row[11],
+        }
+        
+        logger.debug(f"Fetched template ID {template_id}: {result['template_name']}")
+        return result
+        
+    except Exception as e:
+        logger.error(f"Failed to fetch template {template_id}: {e}")
         raise

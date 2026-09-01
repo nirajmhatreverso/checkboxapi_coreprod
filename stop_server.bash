@@ -3,7 +3,7 @@
 # Script: stop-django.sh
 # Purpose: Gracefully stop Django server using PID from api.pid file
 
-PID_FILE="/home/checkboxadmin/scripts/coreprod/api.pid"
+PID_FILE="/home/checkboxadmin/scripts/coreuat/api.pid"
 
 # ------------------------------------------------
 # 1. Check if PID file exists

@@ -126,3 +126,6 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/6.0/howto/static-files/
 
 STATIC_URL = 'static/'
+
+# THIS LINE IS THE KEY — must be present
+DATABASE_ROUTERS = ['core.db_router.OracleRouter']

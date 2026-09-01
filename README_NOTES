@@ -1,0 +1,59 @@
+POST
+http://127.0.0.1:8000/api/info/
+
+
+POST
+http://127.0.0.1:8000/api/execute/
+
+
+util/db.python
+
+this is my flask api script please convert this into python django
+networkInterfaceApi.py
+
+Here's your Flask-based network device command execution API converted to Django (using Django REST Framework - DRF):
+Python
+
+# network_interface_api/
+# ├── __init__.py
+# ├── apps.py
+# ├── urls.py
+# ├── views.py
+# ├── utils.py           ← helper functions moved here
+# ├── config.properties  (optional)
+# └── management/
+#     └── commands/
+#         └── runserver_plus.py   (optional)
+
+1. Project Structure Suggestion
+text
+
+network_device_api/
+├── manage.py
+├── network_device_api/
+│   ├── __init__.py
+│   ├── asgi.py
+│   ├── settings.py
+│   ├── urls.py
+│   └── wsgi.py
+└── api/
+    ├── __init__.py
+    ├── apps.py
+    ├── urls.py
+    ├── views.py
+    └── utils/
+        ├── __init__.py
+        ├── device_executor.py
+        ├── file_utils.py
+        └── logging_config.py
+
+
+##########FOR INFO ENDPOINT##########
+http://127.0.0.1:8000/api/
+
+python .\manage.py runserver 8000
+
+
+python manage.py migrate
+
+python manage.py createsuperuser

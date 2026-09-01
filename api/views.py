@@ -1,3 +1,10 @@
+import os
+import django
+
+# Configure Django settings before importing REST framework
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'coreuat.settings')
+django.setup()
+
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
@@ -8,10 +15,18 @@ import logging
 
 from .utils.logging_config import setup_logging
 from .utils.file_utils import create_unique_file, read_file_to_list
-from .utils.device_executor import execute_device_commands,split_by_error,safe_to_bytes
-from .utils.db import insert_onu_activity_log
+from .utils.device_executor import execute_device_commands,split_by_error, safe_to_bytes, execute_device_commands_with_template, _execute_generic_telnet, execute_device_commands_raw_telnet_with_template
+from .utils.db import insert_onu_activity_log,get_command_with_template
+#get_command_with_template,get_command_configuration_by_id,get_template_by_id,upsert_template_mst, upsert_command_configuration
+# ORM-based replacements for all config/template operations
+from .views_orm import (
+    orm_get_command_configuration_by_id as get_command_configuration_by_id,
+    orm_get_template_by_id             as get_template_by_id,
+    orm_upsert_command_configuration   as upsert_command_configuration,
+    orm_upsert_template_mst            as upsert_template_mst,
+)
 
-logger = setup_logging(debug=False)  # change to True in development
+logger = setup_logging(debug=True)  # change to True in development
 
 ALLOWED_LOGIN_TYPES = {"ssh", "telnet", "olt_ssh", "olt_telnet"}
 
@@ -21,7 +36,9 @@ ERROR_CHECK = [
     "input detected at",
     "There no exist this lineprofile",
     "error! please add the onu offline configuration first!!",
-    ""
+    "code",
+    "invalid",
+    "Error"
 ]
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -151,6 +168,74 @@ class ExecuteCommandsAPIView(APIView):
                 "message": str(e)
             }, status=500)
 
+class ExecuteCommandsWithTemplateAPIView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        client_ip = request.META.get('REMOTE_ADDR', 'unknown')
+        logger.info(f"POST /ExecuteCommandsWithTemplateAPIView from {client_ip}")
+
+        try:
+            data = request.data
+            template_name = data.get("template_name")
+            parameters = data.get("parameters", {})
+            host_name = parameters["host_ip"]
+            if not template_name:
+                return Response({"error": "Missing template_name"}, status=400)
+            if not host_name:
+                return Response({"error": "Missing host_name"}, status=400)
+
+            # Prepare file
+            tmp_file = create_unique_file(TMP_DIR, prefix="exec_cmd_temp_", extension=".tmp")
+
+            # Call your get_command_with_template function here
+            commands = get_command_with_template(template_name)
+            logger.debug(f" result type {type(commands)}")
+            logger.info(f"Retrieved commands for template : {template_name}: {commands}")
+            if not commands:
+                return Response({"error": f"not found commands for template_{template_name}"}, status=400)
+            device = create_device_config_json(commands, host_name, session_log=tmp_file)  
+            # Execute commands based on template
+            
+            if commands['template']['login_type'] == 'ssh' or commands['template']['login_type'] == 'telnet':
+                outputs = execute_device_commands_with_template(
+                    template_name=template_name,
+                    parameters=parameters,
+                    filename=tmp_file,
+                    commands_dict=commands,
+                    host=host_name,
+                    device=device)
+            elif commands['template']['login_type'] == 'custom_telnet':    
+                outputs = execute_device_commands_raw_telnet_with_template(
+                    template_name=template_name,
+                    parameters=parameters,
+                    filename=tmp_file,
+                    commands_dict=commands,
+                    host=host_name,
+                    device=device)
+                    
+            
+            file_content = read_file_to_list(tmp_file)
+            # it will return success & error statements
+            success, failed = split_by_error(file_content, ERROR_CHECK)
+            
+            return Response({
+                "status": "success" if not failed else "Error",
+                "template_name": template_name,
+                "outputs": outputs,
+                "fileName": tmp_file,
+                "successCommands" : success,
+                "failedCommands" : failed,
+                "file_preview": file_content[:100]  # first 100 lines for debug/info
+            }, status=200)
+
+        except Exception as e:
+            logger.exception("Critical error in ExecuteCommandsWithTemplateAPIView endpoint")
+            return Response({
+                "status": "error",
+                "message": str(e)
+            }, status=500)  
+
 class DbLogSaveAPIView(APIView):
     permission_classes = [AllowAny]
     
@@ -213,6 +298,337 @@ class DbLogSaveAPIView(APIView):
             }, status=200)
         except Exception as e:
             logger.exception("Critical error in execute endpoint")
+            return Response({
+                "status": "error",
+                "message": str(e)
+            }, status=500)
+
+
+class GetCommandWithTemplateAPIView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        client_ip = request.META.get('REMOTE_ADDR', 'unknown')
+        logger.info(f"POST /command-template from {client_ip}")
+        
+        try:
+            data = request.data
+            template_name = data.get("template_name")
+            logger.info(f"template_name {template_name}")
+            if not template_name:
+                return Response(
+                    {"error": "Missing template_name parameter"},
+                    status=400
+                )
+            
+            # Call your get_command_with_template function here
+            commands = get_command_with_template(template_name)
+            return Response({
+                "status": "success",
+                "template_name": template_name,
+                "commands": commands
+            }, status=200)
+            
+        except Exception as e:
+            logger.exception("Error in get_command_with_template endpoint")
+            return Response({
+                "status": "error",
+                "message": str(e)
+            }, status=500)
+            
+            
+class GetCommandConfigurationAPIView(APIView):
+    permission_classes = [AllowAny]
+    
+    def post(self, request):
+        client_ip = request.META.get('REMOTE_ADDR', 'unknown')
+        logger.info(f"GET /command-configuration from {client_ip}")
+        try:
+            data = request.data
+            config_id = data.get("id")
+            
+            if not config_id:
+                return Response({"error": "Missing id parameter"}, status=400)
+            
+            logger.info(f"Fetching configuration for id: {config_id}")
+            
+            configuration = get_command_configuration_by_id(config_id)
+            
+            if not configuration:
+                return Response({"error": "Configuration not found"}, status=404)
+            
+            return Response({
+                "status": "success",
+                "configuration": configuration
+            }, status=200)
+        except Exception as e:
+            logger.exception("Critical error in get-command-configuration endpoint")
+            return Response({
+                "status": "error",
+                "message": str(e)
+            }, status=500)
+
+class GetTemplateByIdAPIView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        client_ip = request.META.get('REMOTE_ADDR', 'unknown')
+        
+        try:
+            data = request.data
+            template_id = data.get("id")
+            logger.info(f"GET /template/{template_id} from {client_ip}")
+            template = get_template_by_id(template_id)
+            if not template:
+                return Response({
+                    "status": "error",
+                    "message": f"Template with id {template_id} not found"
+                }, status=404)
+            
+            logger.info(f"Retrieved template: {template_id}")
+            
+            return Response({
+                "status": "success",
+                "data": template
+            }, status=200)
+            
+        except Exception as e:
+            logger.exception("Critical error in get template endpoint")
+            return Response({
+                "status": "error",
+                "message": str(e)
+            }, status=500)
+
+
+class UpsertTemplateAPIView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        client_ip = request.META.get('REMOTE_ADDR', 'unknown')
+        logger.info(f"POST /upsert-template from {client_ip}")
+        
+        try:
+            data = request.data
+            template_name = data.get("template_name")
+            login_type = data.get("login_type")
+            username = data.get("username")
+            password = data.get("password")
+            secret = data.get("secret")
+            global_delay_factor = data.get("global_delay_factor")
+            port = data.get("port")
+            enable_custom = data.get("enable_custom")
+            line_seperator = data.get("line_seperator")
+            host = data.get("host")
+            device_type = data.get("device_type")
+            
+            # Validate required fields
+            if not template_name or not isinstance(template_name, str) or len(template_name.strip()) == 0:
+                return Response(
+                    {"error": "template_name is required and must be a non-empty string"},
+                    status=400
+                )
+            
+            if not login_type or not isinstance(login_type, str):
+                return Response(
+                    {"error": "login_type is required and must be a string"},
+                    status=400
+                )
+            
+            if not username or not isinstance(username, str):
+                return Response(
+                    {"error": "username is required and must be a string"},
+                    status=400
+                )
+            
+            if not password or not isinstance(password, str):
+                return Response(
+                    {"error": "password is required and must be a string"},
+                    status=400
+                )
+            
+            logger.info(f"Upserting template: {template_name}")
+            
+            result = upsert_template_mst(
+                template_name=template_name,
+                login_type=login_type,
+                username=username,
+                password=password,
+                secret=secret,
+                global_delay_factor=global_delay_factor,
+                port=port,
+                enable_custom=enable_custom,
+                line_seperator=line_seperator,
+                host=host,
+                device_type=device_type
+            )
+            
+            return Response({
+                "status": "success",
+                "message": "Template upserted successfully",
+                "data": result
+            }, status=200)
+            
+        except Exception as e:
+            logger.exception("Critical error in upsert-template endpoint")
+            return Response({
+                "status": "error",
+                "message": str(e)
+            }, status=500)
+
+class UpsertCommandConfigurationAPIView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        client_ip = request.META.get('REMOTE_ADDR', 'unknown')
+        logger.info(f"POST /upsert-command-configuration from {client_ip}")
+        
+        try:
+            data = request.data
+            command_name = data.get("command_name")
+            template_id = data.get("template_id")
+            commands = data.get("commands")
+            success_response = data.get("success_response")
+            error_response = data.get("error_response")
+            command_purpose = data.get("command_purpose")
+            error_response_pattern = data.get("error_response_pattern")
+            success_response_pattern = data.get("success_response_pattern")
+            device_name = data.get("device_name")
+            
+            # Validate required fields
+            if not command_name or not isinstance(command_name, str) or len(command_name.strip()) == 0:
+                return Response(
+                    {"error": "command_name is required and must be a non-empty string"},
+                    status=400
+                )
+            
+            if not template_id or not isinstance(template_id, int):
+                return Response(
+                    {"error": "template_id is required and must be an integer"},
+                    status=400
+                )
+            
+            if not commands or not isinstance(commands, str) or len(commands.strip()) == 0:
+                return Response(
+                    {"error": "commands is required and must be a non-empty string"},
+                    status=400
+                )
+            
+            logger.info(f"Upserting command configuration: {command_name}")
+            
+            result = upsert_command_configuration(
+                command_name=command_name,
+                template_id=template_id,
+                commands=commands,
+                success_response=success_response,
+                error_response=error_response,
+                command_purpose=command_purpose,
+                error_resp_pattern=error_response_pattern,
+                success_resp_pattern=success_response_pattern,
+                device_name=device_name
+            )
+            
+            return Response({
+                "status": "success",
+                "message": "Command configuration upserted successfully",
+                "data": result
+            }, status=200)
+            
+        except Exception as e:
+            logger.exception("Critical error in upsert-command-configuration endpoint")
+            return Response({
+                "status": "error",
+                "message": str(e)
+            }, status=500)            
+        
+
+def create_device_config_json(result, hostname, session_log):
+    """
+    Creates a sample device configuration JSON file for testing.
+    """
+    template = result.get('template', {})
+    sample_config = {
+        "device": {
+            "host": hostname,
+            "device_type": template.get('device_type', 'NA'),
+            "username": template.get('username', 'NA'),
+            "password": template.get('password', 'NA'),
+            "secret": template.get('secret', ''),
+            "global_delay_factor": int(template.get('global_delay_factor', 2)),
+            "session_log": session_log,
+            "port": template.get('port', 23),
+            "global_cmd_verify": False
+        }
+    }
+    logger.info(f" sample_config: {sample_config}")
+    return sample_config['device']
+
+
+class ExecuteGenericTelnetAPIView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        client_ip = request.META.get('REMOTE_ADDR', 'unknown')
+        logger.info(f"POST /execute-generic-telnet from {client_ip}")
+
+        try:
+            data = request.data
+            cmts_device = data.get("cmts_device")
+            commands = data.get("commands")
+            enable_custom = data.get("enable_custom", "enable")
+            regex_pattern = data.get("regexPattern", r"ZXAN[>#]")
+            line_separator = data.get("lineSeperator", "@@@@@")
+
+            # -- Validation ------------------------------------------------
+            if not cmts_device or not commands:
+                return Response(
+                    {"error": "Missing cmts_device or commands"},
+                    status=400
+                )
+
+            if not isinstance(commands, list) or not all(isinstance(c, str) for c in commands):
+                return Response(
+                    {"error": "commands must be a list of strings"},
+                    status=400
+                )
+
+            required_device_fields = ["host", "username", "password"]
+            missing_fields = [f for f in required_device_fields if not cmts_device.get(f)]
+            if missing_fields:
+                return Response(
+                    {"error": f"Missing device fields: {', '.join(missing_fields)}"},
+                    status=400
+                )
+
+            # -- Prepare temp file -----------------------------------------
+            tmp_file = create_unique_file(TMP_DIR, prefix="telnet_", extension=".tmp")
+
+            # -- Execute ---------------------------------------------------
+            outputs = _execute_generic_telnet(
+                device=cmts_device,
+                commands=commands,
+                filename=tmp_file,
+                prompt_pattern=regex_pattern,
+                line_separator=line_separator,
+                enable_cmd=enable_custom,
+            )
+
+            success, failed = split_by_error(outputs, ERROR_CHECK)
+            file_content = read_file_to_list(tmp_file)
+
+            return Response({
+                "status": "success",
+                "host": cmts_device.get("host", "unknown"),
+                "login_type": "generic_telnet",
+                "command_count": len(commands),
+                "outputs": outputs,
+                "fileName": tmp_file,
+                "successCommands": success,
+                "failedCommands": failed,
+                "file_preview": file_content[:30]
+            }, status=200)
+
+        except Exception as e:
+            logger.exception("Critical error in execute-generic-telnet endpoint")
             return Response({
                 "status": "error",
                 "message": str(e)
